@@ -10,7 +10,7 @@ COPY . .
 RUN CGO_ENABLED=1 GOOS=linux go build -o kv-server
 
 # Final stage
-FROM golang:1.24.0-slim
+FROM golang:1.24.0-alpine
 
 WORKDIR /app
 
