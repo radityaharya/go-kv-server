@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"kv-server/db"
 	"kv-server/middleware"
@@ -183,12 +184,22 @@ func main() {
 	}
 
 	handlers := &Handlers{db: database}
-	router := gin.Default()
+	router := gin.New()
+
+	router.Use(gin.Recovery())
+	router.Use(gin.LoggerWithWriter(gin.DefaultWriter, "/health"))
 
 	setupRoutes(router, handlers)
 
-	log.Println("Server starting on :8080")
-	if err := router.Run(":8080"); err != nil {
+	srv := &http.Server{
+		Addr:         "0.0.0.0:8080",
+		Handler:      router,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+ // Updated log message
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal("Failed to start server:", err)
 	}
 }
