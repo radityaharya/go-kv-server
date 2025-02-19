@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KV Store Interface</title>
+  <script src="https://unpkg.com/@tailwindcss/browser@4"></script>
+  <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</head>
+
+<body class="bg-black text-neutral-200 p-6" x-data="kvStore">
+  <div class="max-w-4xl mx-auto">
+    <h1 class="text-3xl font-mono mb-2 text-white">Key-Value Store Interface</h1>
+    <!-- Updated stats subtext using new stats property -->
+    <p class="mb-6 text-sm text-gray-400"
+      x-text="'Stats: ' + stats.namespaces + ' namespaces | ' + stats.keyValues + ' key-values'"></p>
+
+    <div class="border border-neutral-800 bg-neutral-900 p-6 mb-6">
+      <h2 class="text-xl font-mono mb-4 text-white">Namespace Management</h2>
+      <div class="flex gap-2 mb-4">
+        <input type="text" x-model="newNamespace" placeholder="Enter namespace name"
+          class="px-3 py-2 bg-black border border-neutral-700 text-white flex-grow font-mono focus:outline-none focus:border-neutral-500">
+        <button x-on:click="createNamespace()"
+          class="px-4 py-2 bg-neutral-800 text-white font-mono hover:bg-neutral-700">Create</button>
+        <button x-on:click="listNamespaces()"
+          class="px-4 py-2 bg-neutral-800 text-white font-mono hover:bg-neutral-700">List</button>
+      </div>
+      <div x-show="namespaceResult" x-text="namespaceResult" x-transition
+        :class="{'text-red-500': namespaceError, 'text-green-500': !namespaceError}"
+        class="p-4 bg-black border border-neutral-800 font-mono"></div>
+    </div>
+
+    <div class="border border-neutral-800 bg-neutral-900 p-6 mb-6">
+      <div class="mb-4">
+        <label class="block text-sm font-mono text-neutral-400 mb-2">Select Namespace:</label>
+        <select x-model="currentNamespace" x-on:change="updateNamespaceContentOnChange()"
+          class="w-full px-3 py-2 bg-black border border-neutral-700 text-white font-mono focus:outline-none focus:border-neutral-500">
+          <template x-for="ns in namespaces" :key="ns">
+            <option x-text="ns" :value="ns"></option>
+          </template>
+        </select>
+      </div>
+
+      <div class="mt-6">
+        <h3 class="text-lg font-mono mb-4 text-white">Namespace Content</h3>
+        <div class="overflow-x-auto">
+          <table class="w-full border-collapse border border-neutral-800">
+            <thead class="bg-neutral-900">
+              <tr>
+                <th class="px-6 py-3 text-left text-xs font-mono text-neutral-400 border border-neutral-800">KEY</th>
+                <th class="px-6 py-3 text-left text-xs font-mono text-neutral-400 border border-neutral-800">VALUE</th>
+              </tr>
+            </thead>
+            <tbody class="bg-black divide-y divide-neutral-800">
+              <template x-if="!namespaceContent || namespaceContent.length === 0">
+                <tr>
+                  <td colspan="2" class="text-center text-neutral-500 py-4">No data in this namespace</td>
+                </tr>
+              </template>
+              <template x-for="item in namespaceContent" :key="item.key">
+                <tr>
+                  <td class="px-6 py-3 border border-neutral-800" x-text="item.key"></td>
+                  <td class="px-6 py-3 border border-neutral-800" x-text="item.value"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+          <!-- New pagination controls -->
+          <div class="flex justify-between items-center mt-4">
+            <button @click="prevPage()" :disabled="page === 1"
+              class="px-3 py-1 bg-neutral-800 text-white font-mono hover:bg-neutral-700 disabled:opacity-50">Previous</button>
+            <span class="text-sm text-gray-400">
+              Page: <span x-text="page"></span> of <span x-text="totalPages"></span> (Total values: <span
+                x-text="totalValues"></span>)
+            </span>
+            <button @click="nextPage()"
+              class="px-3 py-1 bg-neutral-800 text-white font-mono hover:bg-neutral-700">Next</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="border border-neutral-800 bg-neutral-900 p-6 mb-6">
+      <h2 class="text-xl font-mono mb-4 text-white">Get Value</h2>
+      <div class="flex gap-2 mb-4">
+        <input type="text" x-model="getKey" @keyup.enter="getValue()" placeholder="Enter key"
+          class="px-3 py-2 bg-black border border-neutral-700 text-white flex-grow font-mono focus:outline-none focus:border-neutral-500">
+        <button @click="getValue()" :disabled="!currentNamespace"
+          class="px-4 py-2 bg-neutral-800 text-white font-mono hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed">Get</button>
+      </div>
+      <div x-show="getResult" x-text="getResult" x-transition
+        :class="{'text-red-500': getError, 'text-green-500': !getError}"
+        class="p-4 bg-black border border-neutral-800 font-mono"></div>
+    </div>
+
+    <div class="border border-neutral-800 bg-neutral-900 p-6 mb-6">
+      <h2 class="text-xl font-mono mb-4 text-white">Set Value</h2>
+      <div class="flex gap-2 mb-4">
+        <input type="text" x-model="setKey" placeholder="Enter key"
+          class="px-3 py-2 bg-black border border-neutral-700 text-white flex-grow font-mono focus:outline-none focus:border-neutral-500">
+        <input type="text" x-model="valueToSet" placeholder="Enter value"
+          class="px-3 py-2 bg-black border border-neutral-700 text-white flex-grow font-mono focus:outline-none focus:border-neutral-500">
+        <button x-on:click="setValue()"
+          class="px-4 py-2 bg-neutral-800 text-white font-mono hover:bg-neutral-700">Set</button>
+      </div>
+      <div x-show="setResult" x-text="setResult" x-transition
+        :class="{'text-red-500': setError, 'text-green-500': !setError}"
+        class="p-4 bg-black border border-neutral-800 font-mono"></div>
+    </div>
+
+    <div class="border border-neutral-800 bg-neutral-900 p-6 mb-6">
+      <h2 class="text-xl font-mono mb-4 text-white">Delete Value</h2>
+      <div class="flex gap-2 mb-4">
+        <input type="text" x-model="deleteKey" placeholder="Enter key"
+          class="px-3 py-2 bg-black border border-neutral-700 text-white flex-grow font-mono focus:outline-none focus:border-neutral-500">
+        <button x-on:click="deleteValue()"
+          class="px-4 py-2 bg-neutral-800 text-white font-mono hover:bg-neutral-700">Delete</button>
+      </div>
+      <div x-show="deleteResult" x-text="deleteResult" x-transition
+        :class="{'text-red-500': deleteError, 'text-green-500': !deleteError}"
+        class="p-4 bg-black border border-neutral-800 font-mono"></div>
+    </div>
+
+    <!-- Benchmark Section -->
+    <div class="border border-neutral-800 bg-neutral-900 p-6 mb-6">
+      <h2 class="text-xl font-mono mb-4 text-white">Benchmark</h2>
+      <div class="flex gap-2 mb-4 items-center">
+        <label class="text-sm text-neutral-400">Iterations:</label>
+        <input type="number" x-model.number="iterations" min="1"
+          class="w-24 px-2 py-1 bg-black border border-neutral-700 text-white font-mono focus:outline-none focus:border-neutral-500">
+      </div>
+      <!-- New input fields for benchmark namespace and prefix values -->
+      <div class="flex gap-2 mb-4 items-center">
+        <label class="text-sm text-neutral-400 font-mono">BM Namespace:</label>
+        <input type="text" x-model="bmNamespace" placeholder="Namespace"
+          class="w-40 px-2 py-1 bg-black border border-neutral-700 text-white font-mono focus:outline-none focus:border-neutral-500">
+      </div>
+      <div class="flex gap-2 mb-4 items-center">
+        <label class="text-sm text-neutral-400 font-mono">Key Prefix:</label>
+        <input type="text" x-model="bmKeyPrefix" placeholder="Key Prefix"
+          class="w-40 px-2 py-1 bg-black border border-neutral-700 text-white font-mono focus:outline-none focus:border-neutral-500">
+      </div>
+      <div class="flex gap-2 mb-4 items-center">
+        <label class="text-sm text-neutral-400 font-mono">Value Prefix:</label>
+        <input type="text" x-model="bmValuePrefix" placeholder="Value Prefix"
+          class="w-40 px-2 py-1 bg-black border border-neutral-700 text-white font-mono focus:outline-none focus:border-neutral-500">
+      </div>
+      <div class="flex gap-2 mb-4 items-center">
+        <button x-on:click="runBenchmark()"
+          class="px-4 py-2 bg-neutral-800 text-white font-mono hover:bg-neutral-700">Run Benchmark</button>
+      </div>
+      <!-- Updated progress bar element -->
+      <div class="w-full bg-neutral-300 h-4 mb-4">
+        <div class="bg-neutral-700 h-4 text-xs text-center text-white" :style="`width: ${benchmarkProgress}%`"
+          x-text="benchmarkProgress + '%'"></div>
+      </div>
+      <div x-show="benchmarkResult" x-text="benchmarkResult" x-transition
+        class="p-4 bg-black border border-neutral-800 font-mono"></div>
+    </div>
+
+  </div>
+
+  <script>
+    document.addEventListener('alpine:init', () => {
+      Alpine.data('kvStore', () => ({
+        namespaces: [],
+        currentNamespace: '',
+        namespaceContent: {},
+        newNamespace: '',
+        getKey: '',
+        setKey: '',
+        valueToSet: '',
+        deleteKey: '',
+        namespaceResult: '',
+        getResult: '',
+        setResult: '',
+        deleteResult: '',
+        namespaceError: false,
+        getError: false,
+        setError: false,
+        deleteError: false,
+        hasInteractedGet: false,
+        stats: { namespaces: 0, keyValues: 0 },
+        iterations: 1000,
+        benchmarkResult: '',
+        page: 1,
+        limit: 10,
+        benchmarkProgress: 0,
+        bmNamespace: "bench",  // Default benchmark namespace
+        bmKeyPrefix: "bench_",
+        bmValuePrefix: "val_",
+        totalValues: 0,
+        totalPages: 0,
+
+        async apiRequest(method, url, body = null) {
+          const options = { method };
+          if (body) {
+            options.headers = { 'Content-Type': 'application/json' };
+            options.body = JSON.stringify(body);
+          }
+          const response = await fetch(url, options);
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.message);
+          return data;
+        },
+
+        init() {
+          // Reset all results on init
+          this.getResult = '';
+          this.setResult = '';
+          this.deleteResult = '';
+          this.namespaceResult = '';
+          this.updateNamespaceList();
+          this.updateStats();
+        },
+
+        async updateStats() {
+          try {
+            const data = await this.apiRequest('GET', '/api/stats');
+            this.stats = data.data;
+          } catch (error) {
+            console.error("Error updating stats:", error);
+          }
+        },
+
+        async updateNamespaceList() {
+          try {
+            const result = await this.apiRequest('GET', '/api/namespaces');
+            this.namespaces = result.data;
+            if (this.namespaces.length > 0) {
+              this.currentNamespace = this.namespaces[0];
+              await this.updateNamespaceContent();
+              await this.updateNamespaceStats();
+            }
+          } catch (error) {
+            console.error('Error loading namespaces:', error);
+            this.namespaces = [];
+          }
+        },
+
+        showTemporaryMessage(property, message, isError = false) {
+          this[property] = message;
+          this[property + 'Error'] = isError;
+          setTimeout(() => {
+            this[property] = '';
+          }, 3000);
+        },
+
+        async createNamespace() {
+          try {
+            if (!this.newNamespace.trim()) {
+              throw new Error('Namespace name cannot be empty');
+            }
+            const data = await this.apiRequest('POST', `/api/namespace/${this.newNamespace}`);
+            this.showTemporaryMessage('namespaceResult', JSON.stringify(data, null, 2));
+            this.newNamespace = '';
+            await this.updateNamespaceList();
+          } catch (error) {
+            this.showTemporaryMessage('namespaceResult', error.message, true);
+          }
+        },
+
+        async listNamespaces() {
+          try {
+            const data = await this.apiRequest('GET', '/api/namespaces');
+            this.showTemporaryMessage('namespaceResult', JSON.stringify(data, null, 2));
+          } catch (error) {
+            this.showTemporaryMessage('namespaceResult', error.message, true);
+          }
+        },
+
+        async getValue() {
+          this.hasInteractedGet = true;
+          try {
+            if (!this.currentNamespace) {
+              throw new Error('Please select a namespace first');
+            }
+            if (!this.getKey?.trim()) {
+              throw new Error('Key cannot be empty');
+            }
+            const response = await fetch(`/api/ns/${this.currentNamespace}/get/${this.getKey}`);
+            const data = await response.json();
+
+            if (response.status === 404) {
+              if (data.message.includes("Namespace")) {
+                throw new Error(`Namespace "${this.currentNamespace}" does not exist`);
+              } else {
+                throw new Error(`Key "${this.getKey}" does not exist in namespace "${this.currentNamespace}"`);
+              }
+            }
+
+            if (!response.ok) throw new Error(data.message);
+            this.showTemporaryMessage('getResult', `Value: ${data.data.value}`, false);
+            this.getKey = ''; // Clear input after successful get
+          } catch (error) {
+            this.showTemporaryMessage('getResult', error.message, true);
+          }
+        },
+
+        async setValue() {
+          try {
+            if (!this.setKey.trim()) throw new Error('Key cannot be empty');
+            if (!this.valueToSet.trim()) throw new Error('Value cannot be empty');
+
+            const data = await this.apiRequest('POST', `/api/ns/${this.currentNamespace}/set`, { key: this.setKey, value: this.valueToSet });
+            this.showTemporaryMessage('setResult', JSON.stringify(data, null, 2));
+            this.setKey = '';
+            this.valueToSet = '';
+            await this.updateNamespaceContent();
+          } catch (error) {
+            this.showTemporaryMessage('setResult', error.message, true);
+          }
+        },
+
+        async deleteValue() {
+          try {
+            if (!this.deleteKey.trim()) throw new Error('Key cannot be empty');
+
+            const data = await this.apiRequest('DELETE', `/api/ns/${this.currentNamespace}/delete/${this.deleteKey}`);
+            this.showTemporaryMessage('deleteResult', JSON.stringify(data, null, 2));
+            this.deleteKey = '';
+            await this.updateNamespaceContent();
+          } catch (error) {
+            this.showTemporaryMessage('deleteResult', error.message, true);
+          }
+        },
+
+        async updateNamespaceContent() {
+          if (!this.currentNamespace) return;
+          try {
+            const offset = (this.page - 1) * this.limit;
+            const data = await this.apiRequest('GET', `/api/ns/${this.currentNamespace}/get-all?limit=${this.limit}&offset=${offset}`);
+            this.namespaceContent = data.data || [];
+          } catch (error) {
+            console.error('Error loading namespace content:', error);
+            this.namespaceContent = [];
+          }
+        },
+
+        async updateNamespaceStats() {
+          if (!this.currentNamespace) return;
+          try {
+            const countData = await this.apiRequest('GET', `/api/ns/${this.currentNamespace}/count`);
+            this.totalValues = countData.data;
+            this.totalPages = Math.ceil(this.totalValues / this.limit);
+          } catch (error) {
+            console.error('Error loading namespace stats:', error);
+            this.totalValues = 0;
+            this.totalPages = 0;
+          }
+        },
+
+        prevPage() {
+          if (this.page > 1) {
+            this.page--;
+            this.updateNamespaceContent();
+          }
+        },
+
+        nextPage() {
+          this.page++;
+          this.updateNamespaceContent();
+        },
+
+        // Update currentNamespace change to reset page to 1 and fetch fresh stats
+        async updateNamespaceContentOnChange() {
+          this.page = 1;
+          await this.updateNamespaceStats(); // Only fetch stats when namespace changes
+          await this.updateNamespaceContent();
+        },
+
+        async runBenchmark() {
+          // Use the provided bmNamespace if set, else fallback to currentNamespace.
+          let benchNS = this.bmNamespace.trim() || this.currentNamespace;
+          if (this.bmNamespace.trim()) { // if user provided a namespace for benchmark
+            // Check if benchmark namespace exists
+            const nsResp = await this.apiRequest('GET', '/api/namespaces');
+            if (!nsResp.data.includes(this.bmNamespace.trim())) {
+              // Create benchmark namespace if not exist
+              await this.apiRequest('POST', `/api/namespace/${this.bmNamespace.trim()}`);
+            }
+          }
+          if (!benchNS) {
+            this.showTemporaryMessage('benchmarkResult', 'Please provide a benchmark namespace or select one below', true);
+            return;
+          }
+          const iters = parseInt(this.iterations) || 1000;
+          let totalSetTime = 0, totalGetTime = 0;
+          this.benchmarkProgress = 0;
+          for (let i = 0; i < iters; i++) {
+            const randStr = Math.random().toString(36).substring(2, 8);
+            const key = (this.bmKeyPrefix.trim() || "bench_") + randStr;
+            const value = (this.bmValuePrefix.trim() || "val_") + randStr;
+            const setStart = performance.now();
+            await this.apiRequest('POST', `/api/ns/${benchNS}/set`, { key, value });
+            const setEnd = performance.now();
+            totalSetTime += (setEnd - setStart);
+            const getStart = performance.now();
+            await this.apiRequest('GET', `/api/ns/${benchNS}/get/${key}`);
+            const getEnd = performance.now();
+            totalGetTime += (getEnd - getStart);
+            this.benchmarkProgress = Math.round(((i + 1) / iters) * 100);
+          }
+          const avgSet = (totalSetTime / iters).toFixed(2);
+          const avgGet = (totalGetTime / iters).toFixed(2);
+          this.benchmarkResult = `Benchmark (${iters} ops) in ${benchNS}: Avg Set ${avgSet} ms, Avg Get ${avgGet} ms.`;
+        }
+      }));
+    });
+  </script>
+</body>
+
+</html>
