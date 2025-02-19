@@ -42,21 +42,23 @@ func InitDB(path string) (*DB, error) {
 		return nil, err
 	}
 
-	// Set connection pool settings
-	sqlDB.SetMaxOpenConns(25)
-	sqlDB.SetMaxIdleConns(25)
-	sqlDB.SetConnMaxLifetime(5 * time.Minute)
+	sqlDB.SetMaxOpenConns(50)
+	sqlDB.SetMaxIdleConns(40)
+	sqlDB.SetConnMaxLifetime(10 * time.Minute)
 
-	// Configure SQLite for maximum performance
 	optimizations := []string{
 		"PRAGMA journal_mode=WAL",
-		"PRAGMA synchronous=NORMAL",
-		"PRAGMA busy_timeout=5000",
+		"PRAGMA synchronous=OFF",
+		"PRAGMA busy_timeout=30000",
 		"PRAGMA temp_store=MEMORY",
-		"PRAGMA mmap_size=30000000000",
-		"PRAGMA page_size=4096",
-		"PRAGMA cache_size=2000000", // 2GB cache
+		"PRAGMA mmap_size=3000000000",
+		"PRAGMA page_size=32768",
+		"PRAGMA cache_size=8000000",
+		"PRAGMA journal_size_limit=134217728",
+		"PRAGMA wal_autocheckpoint=2000",
 		"PRAGMA locking_mode=NORMAL",
+		"PRAGMA threads=4",
+		"PRAGMA secure_delete=OFF",
 	}
 
 	for _, opt := range optimizations {
@@ -90,26 +92,43 @@ func InitDB(path string) (*DB, error) {
 		db.statements[name] = stmt
 	}
 
+	db.startBackgroundCheckpoint(10 * time.Second)
+
 	return db, nil
+}
+
+func (db *DB) retryExec(stmt *sql.Stmt, args ...any) error {
+	var err error
+	for i := 0; i < 3; i++ {
+		_, err = stmt.Exec(args...)
+		if err != nil && IsLockError(err) {
+			time.Sleep(time.Duration(i*50) * time.Millisecond)
+			continue
+		}
+		break
+	}
+	return err
+}
+
+func (db *DB) retryQueryRow(stmt *sql.Stmt, namespace, key string) (string, error) {
+	var value string
+	var err error
+	for i := 0; i < 3; i++ {
+		err = stmt.QueryRow(namespace, key).Scan(&value)
+		if err != nil && IsLockError(err) {
+			time.Sleep(time.Duration(i*50) * time.Millisecond)
+			continue
+		}
+		break
+	}
+	return value, err
 }
 
 func (db *DB) SetValue(namespace, key, value string) error {
 	db.mu.RLock()
 	stmt := db.statements["setValue"]
 	db.mu.RUnlock()
-
-	_, err := stmt.Exec(namespace, key, value)
-	if err != nil && IsLockError(err) {
-		// Simple retry with backoff
-		for i := 0; i < 3; i++ {
-			time.Sleep(time.Duration(i*50) * time.Millisecond)
-			_, err = stmt.Exec(namespace, key, value)
-			if err == nil {
-				break
-			}
-		}
-	}
-	return err
+	return db.retryExec(stmt, namespace, key, value)
 }
 
 func (db *DB) BatchSetValues(namespace string, kvPairs map[string]string) error {
@@ -119,17 +138,39 @@ func (db *DB) BatchSetValues(namespace string, kvPairs map[string]string) error 
 	}
 	defer tx.Rollback()
 
+	// Disable synchronous writes during batch operation
+	if _, err := tx.Exec("PRAGMA synchronous=OFF"); err != nil {
+		return err
+	}
+
 	stmt, err := tx.Prepare("INSERT OR REPLACE INTO key_values(namespace, key, value) VALUES(?, ?, ?)")
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
 
+	batchSize := 5000 // Increased batch size
+	batch := make([]interface{}, 0, batchSize*3)
+
 	for k, v := range kvPairs {
-		_, err = stmt.Exec(namespace, k, v)
-		if err != nil {
+		batch = append(batch, namespace, k, v)
+		if len(batch) >= batchSize*3 {
+			if _, err := stmt.Exec(batch...); err != nil {
+				return err
+			}
+			batch = batch[:0]
+		}
+	}
+
+	if len(batch) > 0 {
+		if _, err := stmt.Exec(batch...); err != nil {
 			return err
 		}
+	}
+
+	// Re-enable synchronous writes before commit
+	if _, err := tx.Exec("PRAGMA synchronous=NORMAL"); err != nil {
+		return err
 	}
 
 	return tx.Commit()
@@ -187,20 +228,7 @@ func (db *DB) GetValue(namespace, key string) (string, error) {
 	db.mu.RLock()
 	stmt := db.statements["getValue"]
 	db.mu.RUnlock()
-
-	var value string
-	var err error
-
-	for retry := 0; retry < 3; retry++ {
-		err = stmt.QueryRow(namespace, key).Scan(&value)
-
-		if err != nil && IsLockError(err) {
-			time.Sleep(50 * time.Millisecond)
-			continue
-		}
-		break
-	}
-	return value, err
+	return db.retryQueryRow(stmt, namespace, key)
 }
 
 // IsLockError checks if the error is a database lock error
@@ -346,4 +374,67 @@ func (db *DB) BatchDeleteValues(namespace string, keys []string) error {
 	}
 
 	return tx.Commit()
+}
+
+type WriteBatch struct {
+	data      map[string]map[string]string
+	mu        sync.Mutex
+	db        *DB
+	batchSize int
+}
+
+func NewWriteBatch(db *DB, batchSize int) *WriteBatch {
+	if batchSize <= 0 {
+		batchSize = 5000 // Increased default batch size
+	}
+	wb := &WriteBatch{
+		data:      make(map[string]map[string]string),
+		db:        db,
+		batchSize: batchSize,
+	}
+	return wb
+}
+
+func (wb *WriteBatch) Add(namespace, key, value string) {
+	wb.mu.Lock()
+	defer wb.mu.Unlock()
+
+	if wb.data[namespace] == nil {
+		wb.data[namespace] = make(map[string]string)
+	}
+	wb.data[namespace][key] = value
+
+	// Flush if batch size reached
+	if len(wb.data[namespace]) >= wb.batchSize {
+		wb.Flush(namespace)
+	}
+}
+
+func (wb *WriteBatch) Flush(namespace string) error {
+	wb.mu.Lock()
+	defer wb.mu.Unlock()
+
+	if len(wb.data[namespace]) == 0 {
+		return nil
+	}
+
+	err := wb.db.BatchSetValues(namespace, wb.data[namespace])
+	if err == nil {
+		delete(wb.data, namespace)
+	}
+	return err
+}
+
+func (db *DB) startBackgroundCheckpoint(interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			_, err := db.Exec("PRAGMA wal_checkpoint(PASSIVE)")
+			if err != nil && !IsLockError(err) {
+				fmt.Printf("Background checkpoint error: %v\n", err)
+			}
+		}
+	}()
 }
