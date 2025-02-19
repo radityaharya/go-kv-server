@@ -1,0 +1,9 @@
+{
+  "name": "Go",
+  "image": "mcr.microsoft.com/devcontainers/go",
+  "runArgs": ["--device=/dev/net/tun"],
+  "features": {
+    "ghcr.io/tailscale/codespace/tailscale": {},
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  }
+}
