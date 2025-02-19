@@ -97,7 +97,12 @@ func (h *Handlers) setValue(c *gin.Context) {
 		return
 	}
 
-	if err := h.db.SetValue(ns, request.Key, request.Value); err != nil {
+	err := h.db.SetValue(ns, request.Key, request.Value)
+	if err != nil {
+		if db.IsLockError(err) {
+			utils.SendError(c, http.StatusServiceUnavailable, "Database is busy, please retry")
+			return
+		}
 		utils.SendError(c, http.StatusInternalServerError, "Failed to set value: "+err.Error())
 		return
 	}
@@ -179,9 +184,6 @@ func main() {
 	}
 	defer database.Close()
 
-	if err := database.CreateTables(); err != nil {
-		log.Fatal("Failed to create tables:", err)
-	}
 
 	handlers := &Handlers{db: database}
 	router := gin.New()
@@ -194,11 +196,10 @@ func main() {
 	srv := &http.Server{
 		Addr:         "0.0.0.0:8080",
 		Handler:      router,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
- // Updated log message
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal("Failed to start server:", err)
 	}

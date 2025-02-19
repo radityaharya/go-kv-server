@@ -2,18 +2,30 @@ package db
 
 import (
 	"database/sql"
+	"errors"
+	"fmt"
 	"os"
-
 	"path/filepath"
+	"strings"
+	"sync"
+	"time"
 
 	"kv-server/models"
 
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 )
 
 type DB struct {
 	*sql.DB
+	statements map[string]*sql.Stmt
+	mu         sync.RWMutex
 }
+
+type DBError int
+
+const (
+	ErrLocked DBError = iota
+)
 
 func InitDB(path string) (*DB, error) {
 	// Create parent directory if it doesn't exist
@@ -21,28 +33,106 @@ func InitDB(path string) (*DB, error) {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite3", path)
+	sqlDB, err := sql.Open("sqlite3", path)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := db.Ping(); err != nil {
+	if err := sqlDB.Ping(); err != nil {
 		return nil, err
 	}
 
-	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
-		return nil, err
+	// Set connection pool settings
+	sqlDB.SetMaxOpenConns(25)
+	sqlDB.SetMaxIdleConns(25)
+	sqlDB.SetConnMaxLifetime(5 * time.Minute)
+
+	// Configure SQLite for maximum performance
+	optimizations := []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA synchronous=NORMAL",
+		"PRAGMA busy_timeout=5000",
+		"PRAGMA temp_store=MEMORY",
+		"PRAGMA mmap_size=30000000000",
+		"PRAGMA page_size=4096",
+		"PRAGMA cache_size=2000000", // 2GB cache
+		"PRAGMA locking_mode=NORMAL",
 	}
 
-	if _, err := db.Exec("PRAGMA synchronous=NORMAL;"); err != nil {
-		return nil, err
+	for _, opt := range optimizations {
+		if _, err := sqlDB.Exec(opt); err != nil {
+			return nil, err
+		}
 	}
 
-	if _, err := db.Exec("PRAGMA busy_timeout=5000;"); err != nil {
-		return nil, err
+	db := &DB{
+		DB:         sqlDB,
+		statements: make(map[string]*sql.Stmt),
 	}
 
-	return &DB{db}, nil
+	// Create tables first
+	if err := db.CreateTables(); err != nil {
+		return nil, fmt.Errorf("failed to create tables: %w", err)
+	}
+
+	// Prepare common statements after tables exist
+	statements := map[string]string{
+		"setValue":    "INSERT OR REPLACE INTO key_values(namespace, key, value) VALUES(?, ?, ?)",
+		"getValue":    "SELECT value FROM key_values WHERE namespace = ? AND key = ?",
+		"deleteValue": "DELETE FROM key_values WHERE namespace = ? AND key = ?",
+	}
+
+	for name, query := range statements {
+		stmt, err := db.Prepare(query)
+		if err != nil {
+			return nil, fmt.Errorf("failed to prepare statement %s: %w", name, err)
+		}
+		db.statements[name] = stmt
+	}
+
+	return db, nil
+}
+
+func (db *DB) SetValue(namespace, key, value string) error {
+	db.mu.RLock()
+	stmt := db.statements["setValue"]
+	db.mu.RUnlock()
+
+	_, err := stmt.Exec(namespace, key, value)
+	if err != nil && IsLockError(err) {
+		// Simple retry with backoff
+		for i := 0; i < 3; i++ {
+			time.Sleep(time.Duration(i*50) * time.Millisecond)
+			_, err = stmt.Exec(namespace, key, value)
+			if err == nil {
+				break
+			}
+		}
+	}
+	return err
+}
+
+func (db *DB) BatchSetValues(namespace string, kvPairs map[string]string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare("INSERT OR REPLACE INTO key_values(namespace, key, value) VALUES(?, ?, ?)")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for k, v := range kvPairs {
+		_, err = stmt.Exec(namespace, k, v)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
 }
 
 func (db *DB) CreateTables() error {
@@ -57,6 +147,9 @@ func (db *DB) CreateTables() error {
 			PRIMARY KEY (namespace, key),
 			FOREIGN KEY (namespace) REFERENCES namespaces(name)
 		)`,
+
+		`CREATE INDEX IF NOT EXISTS idx_namespace_key ON key_values(namespace, key)`,
+		`CREATE INDEX IF NOT EXISTS idx_namespace ON key_values(namespace)`,
 	}
 
 	for _, query := range queries {
@@ -90,40 +183,35 @@ func (db *DB) ListNamespaces() ([]string, error) {
 	return namespaces, nil
 }
 
-func (db *DB) SetValue(namespace, key, value string) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
+func (db *DB) GetValue(namespace, key string) (string, error) {
+	db.mu.RLock()
+	stmt := db.statements["getValue"]
+	db.mu.RUnlock()
 
-	// Check if namespace exists
-	exists, err := db.NamespaceExists(namespace)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		return sql.ErrNoRows
-	}
+	var value string
+	var err error
 
-	_, err = tx.Exec(
-		"INSERT OR REPLACE INTO key_values(namespace, key, value) VALUES(?, ?, ?)",
-		namespace, key, value,
-	)
-	if err != nil {
-		return err
-	}
+	for retry := 0; retry < 3; retry++ {
+		err = stmt.QueryRow(namespace, key).Scan(&value)
 
-	return tx.Commit()
+		if err != nil && IsLockError(err) {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		break
+	}
+	return value, err
 }
 
-func (db *DB) GetValue(namespace, key string) (string, error) {
-	var value string
-	err := db.QueryRow(
-		"SELECT value FROM key_values WHERE namespace = ? AND key = ?",
-		namespace, key,
-	).Scan(&value)
-	return value, err
+// IsLockError checks if the error is a database lock error
+func IsLockError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, sqlite3.ErrLocked) ||
+		errors.Is(err, sqlite3.ErrBusy) ||
+		strings.Contains(err.Error(), "database is locked") ||
+		strings.Contains(err.Error(), "busy")
 }
 
 func (db *DB) GetAllValues(namespace string) (map[string]string, error) {
@@ -148,10 +236,11 @@ func (db *DB) GetAllValues(namespace string) (map[string]string, error) {
 }
 
 func (db *DB) DeleteValue(namespace, key string) error {
-	_, err := db.Exec(
-		"DELETE FROM key_values WHERE namespace = ? AND key = ?",
-		namespace, key,
-	)
+	db.mu.RLock()
+	stmt := db.statements["deleteValue"]
+	db.mu.RUnlock()
+
+	_, err := stmt.Exec(namespace, key)
 	return err
 }
 
@@ -231,9 +320,30 @@ func (db *DB) GetAllValuesPaginated(namespace string, limit, offset int) ([]mode
 	return kvs, nil
 }
 
-// New helper method to count key-values in a namespace.
 func (db *DB) CountValuesInNamespace(namespace string) (int, error) {
 	var count int
 	err := db.QueryRow("SELECT COUNT(*) FROM key_values WHERE namespace = ?", namespace).Scan(&count)
 	return count, err
+}
+
+func (db *DB) BatchDeleteValues(namespace string, keys []string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare("DELETE FROM key_values WHERE namespace = ? AND key = ?")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, k := range keys {
+		if _, err := stmt.Exec(namespace, k); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
 }
