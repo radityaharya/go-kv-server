@@ -30,6 +30,18 @@ func InitDB(path string) (*DB, error) {
 		return nil, err
 	}
 
+	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
+		return nil, err
+	}
+
+	if _, err := db.Exec("PRAGMA synchronous=NORMAL;"); err != nil {
+		return nil, err
+	}
+
+	if _, err := db.Exec("PRAGMA busy_timeout=5000;"); err != nil {
+		return nil, err
+	}
+
 	return &DB{db}, nil
 }
 
